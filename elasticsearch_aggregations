@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+import argparse
+
+import datetime
+import random
+import json
+import inspect
+
+import requests
+
+# from hyland_debug import debug,prunt
+
+def prunt(*args, sep=' ', end='\n'):
+    """
+    Just like print() but prepend the fuction name
+    """
+    thestack=inspect.stack()
+    funtionnameat=2
+    funtionname=thestack[funtionnameat].function
+    marker=""
+    print(marker+funtionname+"(): ",end='')
+    print(*args, sep=sep, end=end)
+
+def display_response(r):
+    prunt("r.status_code",r.status_code)
+    prunt("r.json",json.dumps(r.json(),indent=4))
+
+def generate_datasets(opts):
+    data={}
+    data['application']=["GedApp","PrintApp","WebApp","AndroidApp"]
+    data['famille']=["facture","devis","bordereau"]
+    data['client']=["ZeBigClient","NumberOneClient","tinnyclient","randomcustomer","OldClient","NewClient"]
+    # https://www.elastic.co/guide/en/elasticsearch/reference/7.17/date.html
+    today = datetime.datetime.today()
+    numdays=5*365 # 5 years
+    data['date']= [(today - datetime.timedelta(days=x)).strftime("%Y-%m-%d") for x in range(numdays)]
+    return data
+
+def delete_index(opts):
+    # https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-delete-index.html
+    url="http://localhost:9200/myindex"
+    headers={'Content-Type': 'application/json'}
+    payload={}
+    r=requests.delete(url, headers=headers, data=json.dumps(payload))
+    display_response(r)
+    
+def put_index(opts):
+    # https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-create-index.html
+    url="http://localhost:9200/myindex"
+    headers={'Content-Type': 'application/json'}
+    payload={}
+    r=requests.put(url, headers=headers, data=json.dumps(payload))
+    display_response(r)
+        
+def put_mapping(opts):
+    # https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-put-mapping.html
+    url="http://localhost:9200/myindex/_mapping"
+    headers={'Content-Type': 'application/json'}
+
+    payload={
+        "dynamic" : "false",
+        "properties" : {
+            "application" : {
+                "type" : "keyword"
+            },
+            "client" : {
+                "type" : "keyword"
+            },
+            "date" : {
+                "type" : "date"
+            },
+            "famille" : {
+                "type" : "keyword"
+            }
+        }
+    }
+    
+    r=requests.put(url, headers=headers,data=json.dumps(payload))
+    display_response(r)
+    
+def create_data(opts):
+    data=generate_datasets(opts)
+    prunt("data",data)
+    docnb=1000
+    url="http://localhost:9200/myindex/_doc"
+    headers={'Content-Type': 'application/json'}
+    for i in range(0,docnb):
+        doc={}
+        for key in data.keys():
+            doc[key]=random.choice(data[key])
+        prunt("doc",i,json.dumps(doc,indent=4))
+
+        # https://logz.io/blog/elasticsearch-tutorial/
+        # curl -XPOST 'localhost:9200/logs/my_app' -H 'Content-Type: application/json' -d'
+        r=requests.post(url, headers=headers,data=json.dumps(doc))
+        display_response(r)
+      
+def query_data(opts):
+    """
+    sends GROUP BY aka aggregation query
+    https://john.soban.ski/aggregations-the-elasticsearch-group-by.html
+    https://john.soban.ski/elasticsearch-aggs-for-time-series.html
+    """
+    queries=[
+        (
+            "GROUP BY client",
+            {
+                "q":"*",
+                "facet.pivot":"client",
+                "indent":"on",
+                "rows":"0",
+                "facet":"on",
+                "wt":"json"
+            },
+            {
+                "aggs": {
+                    "clients": {
+                        "terms": {
+                            "field": "client"
+                        }
+                    }
+                },
+                "size": 0
+            }
+        ),
+        (
+            "GROUP BY application,client",
+            {
+                "q":"*",
+                "facet.pivot":"application,client",
+                "indent":"on",
+                "rows":"0",
+                "facet":"on",
+                "wt":"json"
+            },
+            {
+                "aggs": {
+                    "applications": {
+                        "terms": {
+                            "field": "application"
+                        },
+                        "aggs": {
+                            "clients": {
+                                "terms": {
+                                    "field": "client"
+                                }
+                            }
+                        }
+                    }
+                },
+                "size": 0
+            }
+        ),
+        # https://www.elastic.co/guide/en/elasticsearch/reference/current/search-aggregations-bucket-datehistogram-aggregation.html
+        # also https://www.elastic.co/guide/en/elasticsearch/reference/current/search-aggregations-bucket-daterange-aggregation.html
+        (
+            "WHERE date > (NOW()-3 years) AND date < (NOW()-1 year)  GROUP BY famille,client,MONTH(date) ",
+            {
+                "facet.range":"{!tag=r1}date",
+                "q":"*",
+                "facet.range.gap":"+1MONTH",
+                "facet.pivot":"{!range=r1}famille,client",
+                "indent":"on",
+                "rows":"0",
+                "facet":"on",
+                "wt":"json",
+                "facet.range.start":"NOW-3YEAR",
+                "facet.range.end":"NOW-1YEAR",
+            },
+            {
+                "query": {
+                    "range": {
+                        "date": {
+                            "gte": "now-3y",
+                            "lt": "now-1y"
+                        }
+                    }
+                },
+                "aggs": {
+                    "applications": {
+                        "terms": {
+                            "field": "famille"
+                        },
+                        "aggs": {
+                            "clients": {
+                                "terms": {
+                                    "field": "client"
+                                },
+                                "aggs": {
+                                    "dates": {
+                                        "date_histogram": { # https://www.elastic.co/guide/en/elasticsearch/reference/current/search-aggregations-bucket-datehistogram-aggregation.html
+                                            "field": "date",
+                                            "interval": "month",
+                                            "format": "yyyy-MM", # optional
+                                        }
+                                    }
+
+                                },
+                            }
+                        }
+                    }
+                },
+                "size": 0
+            }
+        ),
+    ]
+    url="http://localhost:9200/myindex/_search?filter_path=aggregations"
+    headers={'Content-Type': 'application/json'}
+    for (description,solrequivalent,query) in queries:
+        prunt("(description,query)",(description,query))
+        r=requests.post(url, headers=headers,data=json.dumps(query))
+        display_response(r)
+    
+def main(opts):
+    """
+    Sample document:
+    budget:49120
+    application: application1
+
+    to get GROUP BY application,codeBudget
+
+    familles: facture
+    created
+    codelient
+
+    to get GROUP BY domainContainerSousFamille,firme:codeClient,MONTH(created)
+    (see also PARTITION BY)
+    """
+
+    # first the DELETEs
+    if opts.delete_index:
+        delete_index(opts)
+
+    # then the PUTs, POSTs
+    if opts.index:
+        put_index(opts)
+    if opts.mapping:
+        put_mapping(opts)
+    if opts.data:
+        create_data(opts)
+    if opts.query:
+        query_data(opts)
+    
+        
+def parse_cli():
+    parser = argparse.ArgumentParser(description="""TOOL DESCRIPTION
+Create an ES index to test agrragation queries.
+
+Typical usage:
+
+hyland_elasticsearch_pivot -I
+hyland_elasticsearch_pivot -i
+hyland_elasticsearch_pivot -m
+hyland_elasticsearch_pivot -h
+hyland_elasticsearch_pivot -d
+hyland_elasticsearch_pivot -d
+hyland_elasticsearch_pivot -d
+hyland_elasticsearch_pivot -d
+hyland_elasticsearch_pivot -d
+hyland_elasticsearch_pivot -q
+
+Requieements:
+you must have ealsticsearch started.
+E.g: on my laptop:
+
+/home/madon/alfrescosoft/elasticsearch-7.10.2/bin/elasticsearch
+
+Tested with latst Apcahce licenced version: elasticsearch-7.10.2
+
+Notes:
+Solr pivot feature is similar to SQL GROUP BY
+and elasticsearch aggregations
+https://john.soban.ski/aggregations-the-elasticsearch-group-by.html
+https://john.soban.ski/elasticsearch-aggs-for-time-series.html
+
+elasticsearch has also a feature called pivot but it more about index transformation:
+
+https://alibaba-cloud.medium.com/simplify-elasticsearch-data-analysis-with-transforms-data-pivoting-291d99cac11
+
+""",formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('-i','--index', help="Create index",action="store_true")
+    parser.add_argument('-I','--delete-index', help="Delete index",action="store_true")
+    parser.add_argument('-m','--mapping', help="Create mapping",action="store_true")
+    parser.add_argument('-d','--data', help="Create data",action="store_true")
+    parser.add_argument('-q','--query', help="Query on data",action="store_true")
+
+    opts = parser.parse_args()
+    prunt("opts:",opts)
+    return opts
+
+if __name__ == "__main__":
+    opts=parse_cli()
+    main(opts)

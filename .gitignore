@@ -1,0 +1,14 @@
+__pycache__/
+tt*
+*~
+.env/
+start.sh
+*.csv
+.env
+alfresco.log*
+share.log*
+# see https://stackoverflow.com/questions/2209810/add-glob-to-gitignore
+[#]*[#]
+\#*#
+
+assets_ignore
